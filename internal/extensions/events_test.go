@@ -4,8 +4,8 @@ import "testing"
 
 func TestAllEventTypes_Count(t *testing.T) {
 	all := AllEventTypes()
-	if len(all) != 36 {
-		t.Fatalf("expected 36 event types, got %d", len(all))
+	if len(all) != 37 {
+		t.Fatalf("expected 37 event types, got %d", len(all))
 	}
 }
 
@@ -51,6 +51,7 @@ func TestEventType_TypeMethod(t *testing.T) {
 		{MessageStartEvent{}, MessageStart},
 		{MessageUpdateEvent{Chunk: "hi"}, MessageUpdate},
 		{MessageEndEvent{Content: "done"}, MessageEnd},
+		{MessageRenderEvent{Chunk: "hi"}, MessageRender},
 		{SessionStartEvent{SessionID: "abc"}, SessionStart},
 		{SessionShutdownEvent{}, SessionShutdown},
 		{ModelChangeEvent{NewModel: "a/b"}, ModelChange},

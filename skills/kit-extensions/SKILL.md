@@ -55,7 +55,7 @@ The `Init` function receives an `ext.API` object for registering handlers, and e
 
 ## Lifecycle Events
 
-Kit provides 30 lifecycle events. Each handler receives an event struct and a `Context`.
+Kit provides 31 lifecycle events. Each handler receives an event struct and a `Context`.
 
 ### Session Events
 
@@ -218,6 +218,16 @@ api.OnMessageUpdate(func(e ext.MessageUpdateEvent, ctx ext.Context) {
 })
 api.OnMessageEnd(func(e ext.MessageEndEvent, ctx ext.Context) {
     // e.Content string — full message content
+})
+
+// Rewrite assistant text before the TUI shows it. Display only: the
+// transcript and the model's context keep the original text.
+api.OnMessageRender(func(e ext.MessageRenderEvent, ctx ext.Context) *ext.MessageRenderResult {
+    // e.Chunk string — the streaming text chunk
+    text := strings.ReplaceAll(e.Chunk, "utilize", "use")
+    return &ext.MessageRenderResult{Chunk: text}
+    // Return nil to leave the chunk unchanged.
+    // Return &ext.MessageRenderResult{Skip: true} to skip displaying this chunk (allowing custom buffering).
 })
 ```
 

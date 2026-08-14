@@ -521,6 +521,12 @@ func (r *Runner) Emit(event Event) (Result, error) {
 			// Chain: keep the latest non-nil result. For ToolResultResult
 			// the caller is responsible for applying the modifications.
 			accumulated = result
+
+			// MessageRender rewrites text in place, so the next handler must
+			// see what the previous one produced rather than the original.
+			if e, r, ok := chainMessageRender(event, result); ok {
+				event, accumulated = e, r
+			}
 		}
 		r.extMu[i].unlock()
 	}
@@ -1285,6 +1291,26 @@ func isBlocking(result Result) bool {
 		return r.Cancel
 	case BeforeCompactResult:
 		return r.Cancel
+	case MessageRenderResult:
+		return r.Skip
 	}
 	return false
+}
+
+// chainMessageRender folds a MessageRenderResult back into the event so the
+// next handler in the chain sees the rewritten text instead of the original,
+// and returns the result the caller should accumulate. The final bool is false
+// for every other event/result pair, in which case the caller keeps the event
+// and result it already has.
+func chainMessageRender(event Event, result Result) (Event, Result, bool) {
+	e, ok := event.(MessageRenderEvent)
+	if !ok {
+		return event, result, false
+	}
+	r, ok := result.(MessageRenderResult)
+	if !ok {
+		return event, result, false
+	}
+	e.Chunk = r.Chunk
+	return e, r, true
 }

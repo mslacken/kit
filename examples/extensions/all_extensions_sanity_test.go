@@ -161,6 +161,7 @@ func TestAllExtensions_ZeroValueEvents(t *testing.T) {
 		extensions.MessageStartEvent{},
 		extensions.MessageUpdateEvent{},
 		extensions.MessageEndEvent{},
+		extensions.MessageRenderEvent{},
 		extensions.SessionStartEvent{},
 		extensions.SessionShutdownEvent{},
 		extensions.ModelChangeEvent{},

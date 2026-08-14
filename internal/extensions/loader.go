@@ -470,6 +470,7 @@ func loadSingleExtension(path string) (*LoadedExtension, error) {
 		onMessageStart:        notifyReg[MessageStartEvent](reg, MessageStart),
 		onMessageUpdate:       notifyReg[MessageUpdateEvent](reg, MessageUpdate),
 		onMessageEnd:          notifyReg[MessageEndEvent](reg, MessageEnd),
+		onMessageRender:       resultReg[MessageRenderEvent, MessageRenderResult](reg, MessageRender),
 		onSessionStart:        notifyReg[SessionStartEvent](reg, SessionStart),
 		onSessionShutdown:     notifyReg[SessionShutdownEvent](reg, SessionShutdown),
 		onModelChange:         notifyReg[ModelChangeEvent](reg, ModelChange),

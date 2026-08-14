@@ -118,12 +118,24 @@ type App struct {
 	widgetUpdatePending  atomic.Bool
 	widgetUpdateTrailing atomic.Bool
 
+	// renderer runs assistant text through the extension OnMessageRender
+	// hook before it reaches the display. It is inert (a pure pass-through)
+	// unless an extension registered a handler.
+	renderer messageRenderer
+
 	// steerDrainFn is the test seam used by releaseBusyAfterCompact to pull
 	// any steer messages that arrived during compaction. In production it is
 	// nil and the helper falls back to a.opts.Kit.DrainSteer(); tests that
 	// need to exercise the steer-drain path without standing up a full
 	// *kit.Kit can set this field directly to inject fake items.
 	steerDrainFn func() []queueItem
+}
+
+// messageRenderer defines the subset of extension API needed by the app display
+// layer to intercept and rewrite streaming text chunks.
+type messageRenderer interface {
+	HasMessageRender() bool
+	ApplyMessageRender(chunk string) (text string, skip bool)
 }
 
 // New creates a new App with the provided options and pre-loaded messages.
@@ -134,6 +146,12 @@ func New(opts Options, initialMessages []kit.LLMMessage) *App {
 	// any caller blocking on it via WaitForIdle should be released immediately.
 	idleCh := make(chan struct{})
 	close(idleCh)
+	// Tests build an App without a Kit; the filter then has nothing to ask
+	// and passes every message through unchanged.
+	var renderer messageRenderer
+	if opts.Kit != nil {
+		renderer = opts.Kit.Extensions()
+	}
 	return &App{
 		opts:       opts,
 		store:      NewMessageStoreWithMessages(initialMessages),
@@ -142,6 +160,7 @@ func New(opts Options, initialMessages []kit.LLMMessage) *App {
 		// cancelStep starts as a no-op so CancelCurrentStep() is always safe.
 		cancelStep: func() {},
 		idleCh:     idleCh,
+		renderer:   renderer,
 	}
 }
 
@@ -604,7 +623,8 @@ func (a *App) CompactConversation(customInstructions string) error {
 		// Subscribe to SDK events for streaming compaction summary to the TUI.
 		// a.sendEvent snapshots a.program under the mutex — reading a.program
 		// directly from this goroutine would race with SetProgram.
-		unsub := a.subscribeSDKEvents(a.sendEvent, nil, true)
+		// nil filter: the compaction summary is not an assistant message.
+		unsub := a.subscribeSDKEvents(a.sendEvent, nil, true, nil)
 		defer unsub()
 
 		result, err := a.opts.Kit.Compact(a.rootCtx, nil, customInstructions)
@@ -663,7 +683,8 @@ func (a *App) CompactAsync(customInstructions string, onComplete func(), onError
 		// Subscribe to SDK events for streaming compaction summary to the TUI.
 		// a.sendEvent snapshots a.program under the mutex — reading a.program
 		// directly from this goroutine would race with SetProgram.
-		unsub := a.subscribeSDKEvents(a.sendEvent, nil, true)
+		// nil filter: the compaction summary is not an assistant message.
+		unsub := a.subscribeSDKEvents(a.sendEvent, nil, true, nil)
 		defer unsub()
 
 		result, err := a.opts.Kit.Compact(a.rootCtx, nil, customInstructions)
@@ -1050,7 +1071,7 @@ func (a *App) executeStep(ctx context.Context, prompt string, eventFn func(Event
 	// Subscribe to SDK events for TUI rendering and per-step usage updates.
 	// The subscription is temporary — it lives only for the duration of this step.
 	var sawStepUsage atomic.Bool
-	unsub := a.subscribeSDKEvents(sendFn, &sawStepUsage, eventFn != nil)
+	unsub := a.subscribeSDKEvents(sendFn, &sawStepUsage, eventFn != nil, a.renderer)
 	defer unsub()
 
 	// Show spinner while the agent works.
@@ -1105,7 +1126,7 @@ func (a *App) executeBatch(ctx context.Context, items []queueItem, eventFn func(
 	// Subscribe to SDK events for TUI rendering and per-step usage updates.
 	// The subscription is temporary — it lives only for the duration of this step.
 	var sawStepUsage atomic.Bool
-	unsub := a.subscribeSDKEvents(sendFn, &sawStepUsage, eventFn != nil)
+	unsub := a.subscribeSDKEvents(sendFn, &sawStepUsage, eventFn != nil, a.renderer)
 	defer unsub()
 
 	// Show spinner while the agent works.
@@ -1186,8 +1207,11 @@ func (a *App) sendEvent(e Event) {
 // consumer that will answer request/response events (password prompts). When
 // false, such events are answered "cancelled" immediately instead of being
 // dispatched — dispatching into a void would leave the SDK blocked forever.
+// render, when non-nil, routes assistant text through the extension
+// OnMessageRender hook; pass nil for streams that are not model replies (the
+// compaction summary), which extensions must not rewrite.
 // Returns an unsubscribe function that removes all listeners.
-func (a *App) subscribeSDKEvents(sendFn func(Event), stepUsageSeen *atomic.Bool, canPrompt bool) func() {
+func (a *App) subscribeSDKEvents(sendFn func(Event), stepUsageSeen *atomic.Bool, canPrompt bool, render messageRenderer) func() {
 	k := a.opts.Kit
 	var unsubs []func()
 
@@ -1214,7 +1238,17 @@ func (a *App) subscribeSDKEvents(sendFn func(Event), stepUsageSeen *atomic.Bool,
 			sendFn(ToolCallContentEvent{Content: ev.Content})
 		case kit.ResponseEvent:
 			sendFn(ResponseCompleteEvent{Content: ev.Content})
+		case kit.TextEndEvent:
+			// No-op in chunk-by-chunk mode.
 		case kit.MessageUpdateEvent:
+			if render != nil && render.HasMessageRender() {
+				text, skip := render.ApplyMessageRender(ev.Chunk)
+				if skip {
+					return
+				}
+				sendFn(StreamChunkEvent{Content: text})
+				return
+			}
 			sendFn(StreamChunkEvent{Content: ev.Chunk})
 		case kit.ReasoningDeltaEvent:
 			sendFn(ReasoningChunkEvent{Delta: ev.Delta})

@@ -93,6 +93,15 @@ func NewTestAPI(ext *LoadedExtension) API {
 				return nil
 			})
 		},
+		onMessageRender: func(h func(MessageRenderEvent, Context) *MessageRenderResult) {
+			reg(MessageRender, func(e Event, c Context) Result {
+				r := h(e.(MessageRenderEvent), c)
+				if r == nil {
+					return nil
+				}
+				return *r
+			})
+		},
 		onSessionStart: func(h func(SessionStartEvent, Context)) {
 			reg(SessionStart, func(e Event, c Context) Result {
 				h(e.(SessionStartEvent), c)

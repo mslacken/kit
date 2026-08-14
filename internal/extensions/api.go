@@ -1296,6 +1296,7 @@ type API struct {
 	onMessageStart            func(func(MessageStartEvent, Context))
 	onMessageUpdate           func(func(MessageUpdateEvent, Context))
 	onMessageEnd              func(func(MessageEndEvent, Context))
+	onMessageRender           func(func(MessageRenderEvent, Context) *MessageRenderResult)
 	onSessionStart            func(func(SessionStartEvent, Context))
 	onSessionShutdown         func(func(SessionShutdownEvent, Context))
 	registerToolFn            func(ToolDef)
@@ -1431,6 +1432,15 @@ func (a *API) OnMessageUpdate(handler func(MessageUpdateEvent, Context)) {
 // OnMessageEnd registers a handler for when the assistant message is complete.
 func (a *API) OnMessageEnd(handler func(MessageEndEvent, Context)) {
 	a.onMessageEnd(handler)
+}
+
+// OnMessageRender registers a handler that fires before a message chunk
+// reaches the TUI. Return a non-nil MessageRenderResult to modify or cancel
+// the chunk. Set Skip=true to prevent rendering; set Chunk to replace text.
+func (a *API) OnMessageRender(handler func(MessageRenderEvent, Context) *MessageRenderResult) {
+	if a.onMessageRender != nil {
+		a.onMessageRender(handler)
+	}
 }
 
 // OnSessionStart registers a handler for when a session is loaded or created.
@@ -2527,6 +2537,25 @@ type MessageEndEvent struct {
 }
 
 func (e MessageEndEvent) Type() EventType { return MessageEnd }
+
+// MessageRenderEvent fires before a message chunk reaches the TUI. Handlers can
+// modify or cancel the chunk by returning a non-nil result.
+type MessageRenderEvent struct {
+	Chunk string
+}
+
+func (e MessageRenderEvent) Type() EventType { return MessageRender }
+
+// MessageRenderResult allows extensions to modify a chunk before it renders.
+// Return nil to let the chunk render unchanged. To cancel the chunk, set Skip=true.
+type MessageRenderResult struct {
+	// Chunk replaces the original text content. Empty string removes the chunk.
+	Chunk string
+	// Skip is true when the chunk should not be rendered (cancelled).
+	Skip bool
+}
+
+func (MessageRenderResult) isResult() {}
 
 // SessionStartEvent fires when a session is loaded or created.
 type SessionStartEvent struct {

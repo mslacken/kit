@@ -7,7 +7,7 @@ description: All extension capabilities — lifecycle events, tools, commands, w
 
 ## Lifecycle events
 
-Extensions can hook into 30 lifecycle events:
+Extensions can hook into 31 lifecycle events:
 
 | Event | Description |
 |-------|-------------|
@@ -29,6 +29,7 @@ Extensions can hook into 30 lifecycle events:
 | `OnMessageStart` | Assistant message started |
 | `OnMessageUpdate` | Streaming text chunk received |
 | `OnMessageEnd` | Assistant message completed |
+| `OnMessageRender` | Assistant chunk about to be displayed — rewrite or skip it before the TUI shows it |
 | `OnModelChange` | Model switched |
 | `OnThinkingLevelChange` | Extended-thinking effort level changed |
 | `OnTerminalResize` | Terminal resized (also fires once at startup) |

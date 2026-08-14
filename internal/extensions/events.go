@@ -59,6 +59,11 @@ const (
 	// MessageEnd fires when the assistant message is complete.
 	MessageEnd EventType = "message_end"
 
+	// MessageRender fires with assistant text that is about to be displayed,
+	// after the model produced it and before the TUI renders it. Handlers can
+	// rewrite or hide the text; the session transcript keeps the original.
+	MessageRender EventType = "message_render"
+
 	// SessionStart fires when a session is loaded or created.
 	SessionStart EventType = "session_start"
 
@@ -152,7 +157,7 @@ func AllEventTypes() []EventType {
 		ToolCall, ToolCallInputStart, ToolCallInputDelta, ToolCallInputEnd,
 		ToolExecutionStart, ToolExecutionEnd, ToolResult,
 		Input, BeforeAgentStart, AgentStart, AgentEnd,
-		MessageStart, MessageUpdate, MessageEnd,
+		MessageStart, MessageUpdate, MessageEnd, MessageRender,
 		SessionStart, SessionShutdown,
 		ModelChange, ContextPrepare,
 		ThinkingLevelChange, TerminalResize, TurnStateChange,

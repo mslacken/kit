@@ -155,6 +155,16 @@ type ExtensionAPI interface {
 	GetToolRenderer(toolName string) *ExtensionToolRenderConfig
 	GetMessageRenderer(name string) *ExtensionMessageRendererConfig
 
+	// Assistant text rewriting (OnMessageRender)
+	//
+	// HasMessageRender reports whether any extension wants to rewrite
+	// assistant text before it is displayed.
+	HasMessageRender() bool
+	// ApplyMessageRender runs a chunk of assistant text through the
+	// OnMessageRender handlers and returns the text to display plus whether
+	// the handlers asked for it to be skipped.
+	ApplyMessageRender(chunk string) (text string, skip bool)
+
 	// Session data
 	GetSessionMessages() []ExtensionSessionMessage
 	AppendEntry(extType, data string) (string, error)
@@ -387,6 +397,27 @@ func (e *extensionAPI) GetMessageRenderer(name string) *ExtensionMessageRenderer
 		return nil
 	}
 	return e.kit.extRunner.GetMessageRenderer(name)
+}
+
+func (e *extensionAPI) HasMessageRender() bool {
+	return e.kit.extRunner != nil && e.kit.extRunner.HasHandlers(extensions.MessageRender)
+}
+
+func (e *extensionAPI) ApplyMessageRender(chunk string) (string, bool) {
+	if !e.HasMessageRender() {
+		return chunk, false
+	}
+	result, _ := e.kit.extRunner.Emit(extensions.MessageRenderEvent{
+		Chunk: chunk,
+	})
+	r, ok := result.(extensions.MessageRenderResult)
+	if !ok {
+		return chunk, false
+	}
+	if r.Skip {
+		return "", true
+	}
+	return r.Chunk, false
 }
 
 // Session data

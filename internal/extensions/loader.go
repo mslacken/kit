@@ -424,6 +424,11 @@ func loadSingleExtension(path string) (*LoadedExtension, error) {
 		return nil, fmt.Errorf("loading extension symbols: %w", err)
 	}
 
+	// Expose the openSUSE/piiplugin filter so extensions can import "kit/pii".
+	if err := i.Use(PiiSymbols()); err != nil {
+		return nil, fmt.Errorf("loading pii symbols: %w", err)
+	}
+
 	// Read and evaluate the extension source file.
 	src, err := os.ReadFile(path)
 	if err != nil {

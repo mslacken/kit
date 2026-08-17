@@ -60,6 +60,7 @@ kit install github.com/mark3labs/kit/examples/extensions --local
 | `protected-paths.go` | Block dangerous operations | `OnToolCall` with blocking |
 | `permission-gate.go` | Confirm destructive actions | `OnToolCall` with confirmation |
 | `usage-budget.go` | Soft cost cap + per-turn report | `OnLLMUsage`, `SetState`/`GetState`, enriched `AgentEndEvent` |
+| `piiplugin.go` | Redact PII before the LLM, restore (styled) on render | `OnContextPrepare`, `OnMessageRender`, `OnMessageEnd`, `kit/pii` |
 
 ### Tools & Commands
 

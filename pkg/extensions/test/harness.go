@@ -109,6 +109,11 @@ func (h *Harness) loadSource(src string, path string) *extensions.LoadedExtensio
 		h.t.Fatalf("failed to load extension symbols: %v", err)
 	}
 
+	// Expose the openSUSE/piiplugin filter so extensions can import "kit/pii".
+	if err := i.Use(extensions.PiiSymbols()); err != nil {
+		h.t.Fatalf("failed to load pii symbols: %v", err)
+	}
+
 	// Evaluate the extension source
 	if _, err := i.Eval(src); err != nil {
 		h.t.Fatalf("failed to evaluate extension source: %v", err)

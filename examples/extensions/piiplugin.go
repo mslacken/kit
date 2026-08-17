@@ -10,13 +10,21 @@
 // Uses the CGO-free getent source for the user-name filter so the extension
 // loads under CGO_ENABLED=0 builds.
 //
-// Option:
+// Options:
 //
 //	pii/highlight   "1" (default) | "0"  — add ANSI styling on restore
+//	pii/log         "1" (default) | "0"  — write a redaction/restoration log
+//	pii/log-file    path (default ~/.kit/pii.log)
 //
 // (env var KIT_OPT_PIILIST_HIGHLIGHT, .kit.yml options.pii/highlight, or
 // ctx.SetOption). When the session is non-interactive, styling is dropped and
-// the restored output is plain text.
+// the restored output is plain text. Every redacted span and every restored
+// span is appended to the log file as
+//
+//	2026-08-17T10:02:11Z | REDACTED | <token> → <original>
+//	2026-08-17T10:02:12Z | RESTORED | <token> → <original>
+//
+// Inspect it with /pii-log (show | tail [n] | clear|reset | path).
 //
 // Usage:
 //
@@ -26,10 +34,13 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	ext "kit/ext"
 	pii "kit/pii"
@@ -50,6 +61,9 @@ import (
 var (
 	stateMu sync.RWMutex
 	filter  *pii.PiiFilter
+
+	logMu       sync.Mutex
+	logRedacted int
 )
 
 // ---------------------------------------------------------------------------
@@ -91,21 +105,121 @@ func carryLen() int {
 }
 
 // redactContent redacts text, holding the write lock around Redact because it
-// may extend the replacement table.
-func redactContent(text, fullInput string) string {
+// may extend the replacement table. It also returns any newly-added spans so
+// the caller can log them after the lock is released (avoids I/O under lock).
+func redactContent(text, fullInput string) (string, map[string]string) {
 	stateMu.Lock()
 	defer stateMu.Unlock()
-	return filter.Redact(text, fullInput)
+	// Copy the map by value: maps are reference types, so assigning
+	// `before = *filter.Replacements` would alias the live map and the diff
+	// below would see Redact's own insertions. A value copy keeps `before` as
+	// a true snapshot of the pre-redaction state.
+	before := map[string]string{}
+	if filter.Replacements != nil {
+		for k, v := range *filter.Replacements {
+			before[k] = v
+		}
+	}
+	out := filter.Redact(text, fullInput)
+	added := map[string]string{}
+	if filter.Replacements != nil {
+		for token, orig := range *filter.Replacements {
+			if _, ok := before[token]; !ok && orig != "" {
+				added[token] = orig
+			}
+		}
+	}
+	return out, added
+}
+
+// logRedactions writes one REDACTED line per newly-added span. Called with the
+// state lock released.
+func logRedactions(ctx ext.Context, added map[string]string) {
+	for token, orig := range added {
+		logRedaction(ctx, token, orig)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Redaction logging helper. Every span is appended to a file (one line each):
+//
+//	2026-08-17T10:02:11Z | REDACTED | <token> → <original>
+//	2026-08-17T10:02:12Z | RESTORED | <token> → <original>
+// ---------------------------------------------------------------------------
+
+// logPath resolves the log file path: the pii/log-file option (default
+// "~/.kit/pii.log"), then ensures the parent directory exists.
+func logPath(ctx ext.Context) string {
+	path := ctx.GetOption("pii/log-file")
+	if path == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			path = home + "/.kit/pii.log"
+		}
+	}
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		os.MkdirAll(dir, 0o755)
+	}
+	return path
+}
+
+// logEnabled reads the pii/log option (default on).
+func logEnabled(ctx ext.Context) bool {
+	v, err := strconv.ParseBool(ctx.GetOption("pii/log"))
+	if err != nil {
+		return true
+	}
+	return v
+}
+
+// logRedaction records a REDACTED line: the replacement token that replaced
+// the original span.
+func logRedaction(ctx ext.Context, token, original string) {
+	writeLog(ctx, "REDACTED", token, original)
+}
+
+// logRestoration records a RESTORED line: a token found in assistant output
+// and replaced by its original value.
+func logRestoration(ctx ext.Context, token, original string) {
+	writeLog(ctx, "RESTORED", token, original)
+}
+
+// writeLog appends one timestamped line. All failures are swallowed — a log
+// write must never disturb the redact/restore pass.
+func writeLog(ctx ext.Context, kind, fieldA, fieldB string) {
+	if !logEnabled(ctx) {
+		return
+	}
+	line := time.Now().Format(time.RFC3339) + " | " + kind +
+		" | " + fieldA + " -> " + fieldB + "\n"
+	path := logPath(ctx)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	logMu.Lock()
+	if kind == "REDACTED" {
+		logRedacted++
+	}
+	f.WriteString(line)
+	logMu.Unlock()
+}
+
+// logRedactedCount returns the number of redaction lines written this process.
+func logRedactedCount() int {
+	logMu.Lock()
+	defer logMu.Unlock()
+	return logRedacted
 }
 
 // styledUnredact returns text with each known replacement token replaced by
 // its original value wrapped in bold bright cyan, and each table key with no
 // usable mapping (defensive) wrapped in strikethrough yellow so an
-// un-restorable span is visible.
+// un-restorable span is visible. Every restoration is also logged.
 //
 // Keys are sorted length-descending so a longer key (e.g. "example.com") wins
 // over a shorter one ("com"), matching the matching order of filter.Unredact.
-func styledUnredact(text string, reps map[string]string) string {
+func styledUnredact(text string, reps map[string]string, ctx ext.Context) string {
 	if len(reps) == 0 {
 		return text
 	}
@@ -133,6 +247,7 @@ func styledUnredact(text string, reps map[string]string) string {
 		}
 		if orig, ok := reps[matched]; ok && orig != "" {
 			b.WriteString("\x1b[1m\x1b[38;5;51m" + orig + "\x1b[0m") // bold bright cyan
+			logRestoration(ctx, matched, orig)
 		} else {
 			b.WriteString("\x1b[9m\x1b[38;5;180m" + matched + "\x1b[0m") // strike yellow
 		}
@@ -144,18 +259,25 @@ func styledUnredact(text string, reps map[string]string) string {
 // unredactChunk restores the original values of a piece of streamed text and
 // applies styling when enabled. It snapshots the table under the read lock and
 // never touches the write path, so it is safe to call concurrently with redact.
-func unredactChunk(text string, highlight bool) string {
+func unredactChunk(text string, highlight bool, ctx ext.Context) string {
 	if highlight {
-		return styledUnredact(text, getReps())
+		return styledUnredact(text, getReps(), ctx)
 	}
-	return plainUnredact(text)
+	return plainUnredact(text, ctx)
 }
 
 // plainUnredact restores values without any ANSI styling (used when highlighting
-// is off or the session is non-interactive).
-func plainUnredact(text string) string {
+// is off or the session is non-interactive). Each token it hits is logged.
+func plainUnredact(text string, ctx ext.Context) string {
 	stateMu.RLock()
 	defer stateMu.RUnlock()
+	if filter.Replacements != nil {
+		for token, orig := range *filter.Replacements {
+			if strings.Contains(text, token) && orig != "" {
+				logRestoration(ctx, token, orig)
+			}
+		}
+	}
 	return filter.Unredact(text)
 }
 
@@ -168,6 +290,16 @@ func Init(api ext.API) {
 		Name:        "pii/highlight",
 		Description: "Add ANSI highlighting to restored PII spans",
 		Default:     "1",
+	})
+	api.RegisterOption(ext.OptionDef{
+		Name:        "pii/log",
+		Description: "Write a redaction/restoration log",
+		Default:     "1",
+	})
+	api.RegisterOption(ext.OptionDef{
+		Name:        "pii/log-file",
+		Description: "Log file path (default ~/.kit/pii.log)",
+		Default:     "",
 	})
 
 	// Build the filter once with the getent user-name source so the build works
@@ -189,7 +321,10 @@ func Init(api ext.API) {
 		msgs := make([]ext.ContextMessage, 0, len(e.Messages))
 		changed := false
 		for _, m := range e.Messages {
-			redacted := redactContent(m.Content, fullInput)
+			redacted, added := redactContent(m.Content, fullInput)
+			if len(added) > 0 {
+				logRedactions(ctx, added)
+			}
 			if redacted == m.Content {
 				// Untouched — keep the original (Index >= 0) so non-text parts
 				// (tool calls, tool results) are preserved verbatim by the bridge.
@@ -229,9 +364,9 @@ func Init(api ext.API) {
 
 		highlight := highlightEnabled(ctx)
 		if highlight {
-			return &ext.MessageRenderResult{Chunk: unredactChunk(safe, true)}
+			return &ext.MessageRenderResult{Chunk: unredactChunk(safe, true, ctx)}
 		}
-		return &ext.MessageRenderResult{Chunk: plainUnredact(safe)}
+		return &ext.MessageRenderResult{Chunk: plainUnredact(safe, ctx)}
 	})
 
 	// Drain the carry tail at message end so the final span is never lost.
@@ -241,14 +376,62 @@ func Init(api ext.API) {
 		}
 		out := ""
 		if highlightEnabled(ctx) {
-			out = unredactChunk(carry, true)
+			out = unredactChunk(carry, true, ctx)
 		} else {
-			out = plainUnredact(carry)
+			out = plainUnredact(carry, ctx)
 		}
 		carry = ""
 		if out != "" {
 			ctx.PrintInfo(out)
 		}
+	})
+
+	// --- /pii-log: inspect the redaction/restoration log ---
+	api.RegisterCommand(ext.CommandDef{
+		Name:        "pii-log",
+		Description: "Show the PII log (tail [n] | clear | path)",
+		Complete: func(prefix string, ctx ext.Context) []string {
+			return []string{"tail", "clear", "path"}
+		},
+		Execute: func(args string, ctx ext.Context) (string, error) {
+			words := strings.Fields(strings.TrimSpace(args))
+			cmd := "tail"
+			n := 15
+			if len(words) > 0 {
+				cmd = words[0]
+				if len(words) > 1 {
+					if v, err := strconv.Atoi(words[1]); err == nil && v > 0 {
+						n = v
+					}
+				} else if cmd == "tail" {
+					if v, err := strconv.Atoi(words[0]); err == nil && v > 0 {
+						n = v
+					}
+				}
+			}
+			path := logPath(ctx)
+			switch cmd {
+			case "path":
+				return path, nil
+			case "clear":
+				os.Remove(path)
+				logMu.Lock()
+				logRedacted = 0
+				logMu.Unlock()
+				return "log cleared: " + path, nil
+			default:
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return "no log at " + path + " (redactions logged this session: " +
+						strconv.Itoa(logRedactedCount()) + ")", nil
+				}
+				lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+				if len(lines) > n {
+					lines = lines[len(lines)-n:]
+				}
+				return strings.Join(lines, "\n"), nil
+			}
+		},
 	})
 }
 

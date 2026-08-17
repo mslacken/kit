@@ -608,31 +608,89 @@ func llmToContextMessages(msgs []LLMMessage) []extensions.ContextMessage {
 }
 
 // contextMessagesToLLM rebuilds an LLM message slice from extension
-// ContextMessages. Messages with a valid index reuse the original from
-// originals; new messages injected by extensions are constructed from
-// role + text.
+// ContextMessages. A message with a valid index reuses the original unmodified
+// message when the extension left its text untouched; when the extension edited
+// Content, the message is rebuilt with that Content as a single leading text
+// part while every non-text part (tool calls, tool results, media) is preserved
+// in its original order. Entries with Index < 0 are created fresh from role +
+// text.
 func contextMessagesToLLM(cms []extensions.ContextMessage, originals []LLMMessage) []LLMMessage {
 	rebuilt := make([]LLMMessage, 0, len(cms))
 	for _, cm := range cms {
 		if cm.Index >= 0 && cm.Index < len(originals) {
-			// Reuse original message (preserves original role and content).
-			rebuilt = append(rebuilt, originals[cm.Index])
-		} else {
-			// New message injected by extension — construct from role + text.
-			role := LLMRoleUser
-			switch cm.Role {
-			case "assistant":
-				role = LLMRoleAssistant
-			case "system":
-				role = LLMRoleSystem
-			case "tool":
-				role = LLMRoleTool
+			orig := originals[cm.Index]
+			if messageText(&orig) == cm.Content {
+				rebuilt = append(rebuilt, orig) // text untouched — reuse verbatim
+				continue
 			}
-			rebuilt = append(rebuilt, LLMMessage{
-				Role:    role,
-				Content: []LLMMessagePart{LLMTextPart{Text: cm.Content}},
-			})
+			rebuilt = append(rebuilt, editedMessage(&orig, cm.Content))
+			continue
 		}
+		rebuilt = append(rebuilt, newMessageFromContext(cm))
 	}
 	return rebuilt
+}
+
+// messageText concatenates the text parts of a message (the same extraction
+// used by llmToContextMessages) so we can tell a real Content edit from a no-op.
+func messageText(m *LLMMessage) string {
+	var sb strings.Builder
+	for _, p := range m.Content {
+		if tp, ok := p.(LLMTextPart); ok {
+			sb.WriteString(tp.Text)
+		}
+	}
+	return sb.String()
+}
+
+// editedMessage rebuilds src so its text carries newtext while keeping every
+// non-text part in its original relative order. If src had no text part, a new
+// text part is prepended and all parts are kept. Any additional text parts are
+// folded into the single leading text part, since messageText already
+// concatenated them into newtext.
+func editedMessage(src *LLMMessage, newtext string) LLMMessage {
+	out := *src
+	firstText := -1
+	for i, p := range src.Content {
+		if _, ok := p.(LLMTextPart); ok {
+			firstText = i
+			break
+		}
+	}
+	parts := make([]LLMMessagePart, 0, len(src.Content))
+	if firstText == -1 {
+		parts = append(parts, LLMTextPart{Text: newtext})
+		parts = append(parts, src.Content...)
+	} else {
+		for i, p := range src.Content {
+			if i == firstText {
+				parts = append(parts, LLMTextPart{Text: newtext})
+				continue
+			}
+			if _, ok := p.(LLMTextPart); ok {
+				continue // fold additional text parts into the leading part
+			}
+			parts = append(parts, p)
+		}
+	}
+	out.Content = parts
+	return out
+}
+
+// newMessageFromContext builds a fresh LLMMessage for Index < 0 entries from
+// the extension's role + text.
+func newMessageFromContext(cm extensions.ContextMessage) LLMMessage {
+	role := LLMRoleUser
+	switch cm.Role {
+	case "assistant":
+		role = LLMRoleAssistant
+	case "system":
+		role = LLMRoleSystem
+	case "tool":
+		role = LLMRoleTool
+	}
+	return LLMMessage{
+		Role:    role,
+		Content: []LLMMessagePart{LLMTextPart{Text: cm.Content}},
+	}
 }
